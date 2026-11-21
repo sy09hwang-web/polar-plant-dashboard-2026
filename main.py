@@ -1,161 +1,572 @@
-# 생육·환경 데이터 분석 대시보드 제작 프롬프트
+import io
+import os
+import zipfile
+import numpy as np
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 
-첨부한 4개 파일을 모두 꼼꼼하게 확인하고, 파일에 들어 있는 실제 데이터와 아래에 제공된 Python 코드의 구조 및 기능을 참고하여 학교별 미생물 처리 실험의 환경 데이터와 생육 데이터를 분석하는 웹 대시보드를 제작해줘.
+from plotly.subplots import make_subplots
 
-## 1. 첨부 자료 확인
+st.set_page_config(
+    page_title="미생물 실험 생육 분석",
+    page_icon="🌱",
+    layout="wide"
+)
 
-첨부한 4개 파일을 모두 활용해줘.
+# ─────────────────────────────────────
+# 디자인
+# ─────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
 
-- 환경 데이터 엑셀 파일
-- 생육 결과 데이터 엑셀 파일
-- 압축파일 안에 포함된 관련 데이터 및 자료
-- 기존 분석 대시보드 코드가 담긴 텍스트 파일
+html, body, [class*="css"], [class*="st-"] {
+    font-family: 'Noto Sans KR', sans-serif;
+}
 
-파일마다 데이터 형식, 열 이름, 측정 항목, 날짜, 개체번호, 학교명 등을 확인하고, 실제 파일 구조에 맞게 분석해줘.
+.block-container {
+    padding-top: 1.8rem;
+}
 
-파일에 없는 데이터를 임의로 만들어내거나 측정값을 수정하지 마. 데이터가 부족하거나 형식이 불분명한 경우에는 임의로 해석하지 말고 명확히 표시해줘.
+[data-testid="stMetric"] {
+    background-color: #f4f8f4;
+    padding: 16px;
+    border-radius: 12px;
+    border: 1px solid #e2ebe2;
+}
 
-## 2. 대시보드 전체 구성
+h1, h2, h3 {
+    color: #244b36;
+}
+</style>
+""", unsafe_allow_html=True)
 
-Streamlit을 이용해 웹 기반 대시보드를 제작해줘.
 
-전체적인 디자인은 깔끔하고 직관적인 데이터 분석 사이트 형태로 구성하고, 과도한 장식보다는 그래프와 수치가 잘 보이도록 해줘.
+# ─────────────────────────────────────
+# 데이터 처리 함수
+# ─────────────────────────────────────
+def standardize_columns(df):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
 
-상단에는 프로젝트 제목과 간단한 설명을 표시하고, 사이드바에는 데이터 선택 및 분석 필터 기능을 배치해줘.
+    rename = {}
 
-다음 세 가지 탭으로 구성해줘.
+    for col in df.columns:
+        key = col.lower().replace(" ", "").replace("_", "")
 
-1. 환경 데이터 분석
-2. 생육 데이터 분석
-3. 환경-생육 종합 분석
+        if key in ["time", "시간", "날짜", "date", "datetime", "측정시간"]:
+            rename[col] = "time"
 
-## 3. 환경 데이터 분석
+        elif key in ["temperature", "온도", "기온"]:
+            rename[col] = "temperature"
 
-환경 데이터 파일에 실제로 존재하는 측정 항목을 기준으로 분석해줘.
+        elif key in ["humidity", "습도"]:
+            rename[col] = "humidity"
 
-가능한 항목은 다음과 같아.
+        elif key in ["ph"]:
+            rename[col] = "ph"
 
-- 온도
-- 습도
-- pH
-- EC
+        elif key in ["ec"]:
+            rename[col] = "ec"
 
-각 항목에 대해 다음 기능을 구현해줘.
+        elif "개체번호" in key or key in ["id", "individual"]:
+            rename[col] = "개체번호"
 
-- 평균값, 최댓값, 최솟값 등 핵심 통계 표시
-- 날짜 및 시간에 따른 데이터 변화 그래프
-- 시간 흐름에 따른 변화 추세선
-- 날짜 범위 필터
-- 원본 데이터 확인용 테이블
+        elif "잎수" in key:
+            rename[col] = "잎 수"
 
-그래프는 각 환경 지표를 구분해 표시하고, 수치와 단위가 정확하게 표시되도록 해줘.
+        elif "지상부" in key and "길이" in key:
+            rename[col] = "지상부 길이"
 
-실제 파일에 없는 환경 항목은 생성하지 말고, 존재하는 항목만 자동으로 표시해줘.
+        elif "지하부" in key and "길이" in key:
+            rename[col] = "지하부 길이"
 
-## 4. 생육 데이터 분석
+        elif "지상부" in key and ("질량" in key or "무게" in key):
+            rename[col] = "지상부 질량"
 
-생육 결과 파일에 포함된 실제 측정 항목을 기반으로 분석해줘.
+        elif "지하부" in key and ("질량" in key or "무게" in key):
+            rename[col] = "지하부 질량"
 
-가능한 항목은 다음과 같아.
+        elif "생중량" in key:
+            rename[col] = "생중량"
 
-- 잎 수
-- 지상부 길이
-- 지하부 길이
-- 지상부 질량
-- 지하부 질량
-- 생중량
+    df = df.rename(columns=rename)
 
-다음 기능을 구현해줘.
+    # 숫자 데이터 변환
+    for col in df.columns:
+        if col not in ["time", "개체번호"]:
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            )
 
-- 각 생육 지표의 평균 및 주요 통계량
-- 개체별 생육 결과 비교 그래프
-- 생중량 기준 개체별 순위 비교
-- 생육 지표 간 산점도
-- 상관계수 표시
-- 상위 및 하위 개체 확인
-- 원본 생육 데이터 테이블
+    # 생중량 계산
+    if (
+        "생중량" not in df.columns
+        and "지상부 질량" in df.columns
+        and "지하부 질량" in df.columns
+    ):
+        df["생중량"] = df["지상부 질량"] + df["지하부 질량"]
 
-생중량은 파일에 직접 존재하는 경우 해당 데이터를 사용하고, 지상부 질량과 지하부 질량으로 계산할 수 있는 경우에는 두 값의 합으로 계산해줘. 단, 기존 생중량 값과 계산값이 모두 존재한다면 서로 임의로 대체하지 말고 데이터의 정의와 차이를 확인해줘.
+    # 날짜 변환
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
 
-개체번호를 기준으로 분석하고, 개체번호가 없는 경우에는 임의로 개체를 연결하지 마.
+    return df
 
-## 5. 환경 데이터와 생육 데이터의 종합 분석
 
-이 탭은 단순히 그래프를 나열하는 것이 아니라 환경 조건과 생육 결과 사이의 관계를 살펴볼 수 있도록 구성해줘.
+def read_csv_auto(file):
+    data = file.getvalue()
 
-다음 기능을 포함해줘.
+    for encoding in ["utf-8-sig", "cp949", "utf-8"]:
+        try:
+            return pd.read_csv(io.BytesIO(data), encoding=encoding)
+        except Exception:
+            continue
 
-- 날짜별 환경 데이터 평균 계산
-- 환경 데이터 변화 추이 시각화
-- 생육 지표별 요약 통계
-- 생육 지표 간 상관관계 분석
-- 환경 조건과 생육 결과 사이의 관계를 탐색할 수 있는 분석
+    return pd.DataFrame()
 
-환경 데이터의 측정 시점과 생육 측정 시점이 다를 수 있으므로 날짜, 측정 기간, 데이터 수를 먼저 확인해줘.
 
-환경 데이터와 생육 데이터의 연결 기준이 명확하지 않은 경우, 억지로 특정 환경 조건이 생육 결과를 유발했다고 결론 내리지 마. 상관관계와 인과관계를 구분하고, 데이터로 확인할 수 있는 경향만 설명해줘.
+def read_excel_auto(file):
+    try:
+        return pd.read_excel(file)
+    except Exception:
+        return pd.DataFrame()
 
-## 6. 그래프 및 시각화
 
-Plotly를 활용해 시각화해줘.
+def numeric_columns(df):
+    return [
+        col for col in df.columns
+        if pd.api.types.is_numeric_dtype(df[col])
+    ]
 
-그래프에는 다음 요소를 적용해줘.
 
-- 한눈에 비교할 수 있는 색상
-- 명확한 제목
-- 축 이름 및 단위
-- 마우스를 올렸을 때 상세 수치 표시
-- 한글 폰트 적용
-- 데이터가 겹치거나 지나치게 복잡하지 않은 레이아웃
+def safe_mean(series):
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    if len(series) == 0:
+        return None
+    return series.mean()
 
-필요한 경우 그래프를 여러 개로 나누어 배치하고, 모든 그래프가 화면에서 잘 보이도록 크기를 조정해줘.
 
-## 7. 데이터 처리 및 오류 방지
+def show_metrics(df, columns):
+    available = [c for c in columns if c in df.columns]
 
-데이터를 불러올 때 다음 사항을 고려해줘.
+    if not available:
+        st.info("표시할 수 있는 분석 데이터가 없습니다.")
+        return
 
-- 한글 인코딩 문제 처리
-- 열 이름 공백 및 형식 표준화
-- 날짜 형식 자동 인식
-- 숫자 데이터에 포함된 쉼표 등의 문자 처리
-- 결측값 처리
-- 실제 존재하는 열만 분석에 사용
-- 데이터가 부족한 경우 오류 대신 안내 문구 표시
-- 파일 형식이 예상과 다를 경우 사용자에게 알림
+    cols = st.columns(min(len(available), 4))
 
-데이터를 분석하기 전에 각 파일의 구조를 확인하고, 서로 다른 파일의 열 이름이나 형식이 다르더라도 가능한 범위에서 적절히 대응해줘.
+    for i, name in enumerate(available[:4]):
+        value = safe_mean(df[name])
 
-## 8. 추가 기능
+        if value is not None:
+            cols[i].metric(
+                name,
+                f"{value:.2f}",
+                help="전체 데이터 평균"
+            )
+        else:
+            cols[i].metric(name, "데이터 부족")
 
-가능하다면 다음 기능도 포함해줘.
 
-- 분석 대상 학교 선택
-- 날짜 범위 필터
-- 분석 데이터 표 확인
-- CSV 다운로드 기능
-- 그래프 및 결과를 보기 편하게 배치
-- 분석에 사용된 데이터 수 표시
-- 데이터가 변경되면 분석 결과도 자동으로 갱신
+# ─────────────────────────────────────
+# 사이드바 파일 업로드
+# ─────────────────────────────────────
+st.sidebar.title("📁 데이터 업로드")
 
-여러 학교 데이터가 포함되어 있다면 학교별로 구분해 분석할 수 있도록 구성해줘.
+env_file = st.sidebar.file_uploader(
+    "환경 데이터 파일",
+    type=["csv", "xlsx", "xls"],
+    key="env"
+)
 
-## 9. 디자인 방향
+growth_file = st.sidebar.file_uploader(
+    "생육 데이터 파일",
+    type=["csv", "xlsx", "xls"],
+    key="growth"
+)
 
-전체 디자인은 다음 느낌으로 제작해줘.
 
-- 식물과 생명과학 실험에 어울리는 자연스러운 색감
-- 연한 녹색, 흰색, 중립적인 회색을 활용한 깔끔한 디자인
-- 통계 카드와 그래프가 중심이 되는 레이아웃
-- 글씨가 작거나 정보가 지나치게 빽빽하지 않도록 구성
-- 실제 데이터 분석 플랫폼처럼 전문적이고 완성도 있는 UI
-- 학생이 실험 결과를 발표하거나 탐구 보고서 작성에 활용할 수 있는 형태
+def load_file(file):
+    if file is None:
+        return None
 
-## 10. 최종 결과
+    ext = os.path.splitext(file.name)[1].lower()
 
-실제 첨부 파일을 기반으로 정상 작동하는 전체 코드를 작성해줘.
+    try:
+        if ext == ".csv":
+            return read_csv_auto(file)
 
-기존 예시 코드의 주요 기능을 유지하되, 첨부된 파일의 데이터 구조에 맞게 개선해줘.
+        elif ext in [".xlsx", ".xls"]:
+            return pd.read_excel(file)
 
-코드 일부만 제공하지 말고 실행 가능한 전체 코드로 작성해줘. 데이터 파일을 업로드하면 자동으로 분석 결과, 통계, 그래프가 나타나도록 하고, 데이터 형식이 맞지 않을 경우에도 오류 원인을 쉽게 확인할 수 있도록 해줘.
+    except Exception as e:
+        st.error(f"{file.name} 파일 읽기 오류: {e}")
 
-특히 환경 데이터와 생육 데이터의 관계를 분석할 때 데이터에 없는 사실을 추측하지 않고, 실제 측정 결과에 기반한 객관적인 분석을 제공하는 것이 가장 중요해.
+    return None
+
+
+env_raw = load_file(env_file)
+growth_raw = load_file(growth_file)
+
+env_df = standardize_columns(env_raw) if env_raw is not None else None
+growth_df = standardize_columns(growth_raw) if growth_raw is not None else None
+
+
+# ─────────────────────────────────────
+# 제목
+# ─────────────────────────────────────
+st.title("🌱 미생물 처리 실험 데이터 분석")
+st.caption("환경 조건 및 식물 생육 데이터 기반 분석 대시보드")
+
+st.divider()
+
+
+# ─────────────────────────────────────
+# 탭
+# ─────────────────────────────────────
+tab1, tab2, tab3 = st.tabs([
+    "📊 환경 데이터",
+    "🌿 생육 데이터",
+    "🔗 종합 분석"
+])
+
+
+# ═════════════════════════════════════
+# TAB 1 환경 데이터
+# ═════════════════════════════════════
+with tab1:
+
+    st.header("환경 데이터 분석")
+
+    if env_df is None or env_df.empty:
+        st.info("사이드바에서 환경 데이터 파일을 업로드해 주세요.")
+
+    else:
+
+        env_metrics = [
+            ("temperature", "온도 (℃)"),
+            ("humidity", "습도 (%)"),
+            ("ph", "pH"),
+            ("ec", "EC")
+        ]
+
+        available_metrics = [
+            key for key, label in env_metrics
+            if key in env_df.columns
+        ]
+
+        metric_cols = st.columns(4)
+
+        for i, (key, label) in enumerate(env_metrics):
+            if key in env_df.columns:
+                mean_value = safe_mean(env_df[key])
+
+                if mean_value is not None:
+                    metric_cols[i].metric(
+                        label,
+                        f"{mean_value:.2f}"
+                    )
+                else:
+                    metric_cols[i].metric(label, "데이터 부족")
+
+            else:
+                metric_cols[i].metric(label, "–")
+
+        st.divider()
+
+        # 환경 데이터 변화 그래프
+        if "time" in env_df.columns and available_metrics:
+
+            chart_df = env_df.dropna(subset=["time"]).sort_values("time")
+
+            for key in available_metrics:
+
+                fig = go.Figure()
+
+                valid = chart_df[["time", key]].dropna()
+
+                fig.add_trace(go.Scatter(
+                    x=valid["time"],
+                    y=valid[key],
+                    mode="lines+markers",
+                    name=key,
+                    line=dict(width=2)
+                ))
+
+                if len(valid) >= 2:
+                    x = np.arange(len(valid))
+                    y = valid[key].values
+
+                    slope, intercept = np.polyfit(x, y, 1)
+
+                    fig.add_trace(go.Scatter(
+                        x=valid["time"],
+                        y=slope * x + intercept,
+                        mode="lines",
+                        name="추세선",
+                        line=dict(dash="dash")
+                    ))
+
+                fig.update_layout(
+                    title=f"{key} 변화 추이",
+                    xaxis_title="측정 시간",
+                    yaxis_title=key,
+                    height=350,
+                    hovermode="x unified"
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.warning("시간 데이터가 없거나 분석할 환경 지표가 부족합니다.")
+
+        # 환경 통계
+        st.subheader("환경 데이터 통계")
+
+        valid_numeric = numeric_columns(env_df)
+
+        if valid_numeric:
+            st.dataframe(
+                env_df[valid_numeric].describe().round(2),
+                use_container_width=True
+            )
+
+        # 원본 데이터
+        st.subheader("환경 원본 데이터")
+
+        st.dataframe(
+            env_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.download_button(
+            "📥 환경 데이터 다운로드",
+            env_df.to_csv(index=False, encoding="utf-8-sig"),
+            file_name="환경데이터.csv",
+            mime="text/csv"
+        )
+
+
+# ═════════════════════════════════════
+# TAB 2 생육 데이터
+# ═════════════════════════════════════
+with tab2:
+
+    st.header("생육 데이터 분석")
+
+    if growth_df is None or growth_df.empty:
+        st.info("사이드바에서 생육 데이터 파일을 업로드해 주세요.")
+
+    else:
+
+        growth_metrics = [
+            "잎 수",
+            "지상부 길이",
+            "지하부 길이",
+            "지상부 질량",
+            "지하부 질량",
+            "생중량"
+        ]
+
+        available_growth = [
+            c for c in growth_metrics
+            if c in growth_df.columns
+        ]
+
+        show_metrics(growth_df, available_growth)
+
+        st.divider()
+
+        # 개체별 생중량
+        if "개체번호" in growth_df.columns and "생중량" in growth_df.columns:
+
+            weight_df = growth_df[["개체번호", "생중량"]].dropna()
+
+            if not weight_df.empty:
+
+                weight_df = weight_df.sort_values(
+                    "생중량",
+                    ascending=False
+                )
+
+                fig = px.bar(
+                    weight_df,
+                    x="개체번호",
+                    y="생중량",
+                    color="생중량",
+                    color_continuous_scale="Greens",
+                    title="개체별 생중량 비교"
+                )
+
+                fig.update_layout(height=450)
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.subheader("생중량 상위 5개 개체")
+
+                st.dataframe(
+                    weight_df.head(5),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.subheader("생중량 하위 5개 개체")
+
+                st.dataframe(
+                    weight_df.tail(5).sort_values("생중량"),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+        st.divider()
+
+        # 산점도
+        scatter_pairs = [
+            ("잎 수", "지상부 길이"),
+            ("잎 수", "생중량"),
+            ("지상부 길이", "생중량"),
+            ("지하부 길이", "생중량")
+        ]
+
+        for x, y in scatter_pairs:
+
+            if x in growth_df.columns and y in growth_df.columns:
+
+                data = growth_df[[x, y]].dropna()
+
+                if len(data) >= 2:
+
+                    corr = data[x].corr(data[y])
+
+                    fig = px.scatter(
+                        data,
+                        x=x,
+                        y=y,
+                        trendline="ols",
+                        title=f"{x}와 {y}의 관계 (r={corr:.2f})"
+                    )
+
+                    fig.update_layout(height=380)
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+        # 통계
+        st.subheader("생육 지표 통계")
+
+        if available_growth:
+            st.dataframe(
+                growth_df[available_growth].describe().round(2),
+                use_container_width=True
+            )
+
+        # 전체 데이터
+        st.subheader("생육 데이터 원본")
+
+        st.dataframe(
+            growth_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.download_button(
+            "📥 생육 데이터 다운로드",
+            growth_df.to_csv(index=False, encoding="utf-8-sig"),
+            file_name="생육데이터.csv",
+            mime="text/csv"
+        )
+
+
+# ═════════════════════════════════════
+# TAB 3 종합 분석
+# ═════════════════════════════════════
+with tab3:
+
+    st.header("환경-생육 종합 분석")
+
+    if env_df is None or growth_df is None:
+        st.info("환경 데이터와 생육 데이터를 모두 업로드해야 종합 분석이 가능합니다.")
+
+    else:
+
+        st.subheader("생육 지표 간 상관관계")
+
+        growth_numeric = [
+            c for c in growth_metrics
+            if c in growth_df.columns
+        ]
+
+        if len(growth_numeric) >= 2:
+
+            corr = growth_df[growth_numeric].corr()
+
+            fig = px.imshow(
+                corr,
+                text_auto=".2f",
+                color_continuous_scale="RdYlGn",
+                title="생육 지표 상관관계",
+                aspect="auto"
+            )
+
+            fig.update_layout(height=550)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
+        # 환경 데이터 일별 평균
+        if "time" in env_df.columns:
+
+            env_valid = env_df.dropna(subset=["time"]).copy()
+
+            env_valid["날짜"] = env_valid["time"].dt.date
+
+            daily_cols = [
+                c for c in ["temperature", "humidity", "ph", "ec"]
+                if c in env_valid.columns
+            ]
+
+            if daily_cols:
+
+                daily = env_valid.groupby("날짜")[daily_cols].mean().reset_index()
+
+                st.subheader("일별 환경 변화")
+
+                for col in daily_cols:
+
+                    fig = px.line(
+                        daily,
+                        x="날짜",
+                        y=col,
+                        markers=True,
+                        title=f"일별 평균 {col} 변화"
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
+        # 생육 요약
+        st.subheader("생육 데이터 요약")
+
+        if growth_numeric:
+
+            summary = growth_df[growth_numeric].describe().round(2)
+
+            st.dataframe(
+                summary,
+                use_container_width=True
+            )
+
+        st.info("""
+        분석 시 주의사항
+
+        - 상관관계는 인과관계를 의미하지 않습니다.
+        - 환경 데이터와 생육 데이터의 측정 시점이 다를 수 있습니다.
+        - 실제 데이터에 기반한 결과만 해석해야 합니다.
+        - 표본 수와 결측값에 따라 분석의 신뢰도가 달라질 수 있습니다.
+        """)
