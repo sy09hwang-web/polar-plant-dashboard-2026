@@ -1,222 +1,161 @@
-import io
-import os
-import numpy as np
-import pandas as pd
-import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+# 생육·환경 데이터 분석 대시보드 제작 프롬프트
 
-# ─────────────────────────────────────────────
-# 페이지 설정 및 한글 폰트 CSS
-# ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="인천아라고등학교 생육·환경 분석 대시보드",
-    page_icon="🌱",
-    layout="wide"
-)
+첨부한 4개 파일을 모두 꼼꼼하게 확인하고, 파일에 들어 있는 실제 데이터와 아래에 제공된 Python 코드의 구조 및 기능을 참고하여 학교별 미생물 처리 실험의 환경 데이터와 생육 데이터를 분석하는 웹 대시보드를 제작해줘.
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR&display=swap');
-html, body, [class*="css"] {
-   font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif;
-}
-</style>
-""", unsafe_allow_html=True)
+## 1. 첨부 자료 확인
 
-# ─────────────────────────────────────────────
-# 필수 2: 열 이름 표준화 함수
-# ─────────────────────────────────────────────
-def std_cols(df):
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    rename = {}
-    for c in df.columns:
-        k = c.lower().replace(" ", "")
-        if k in ("time", "categories", "시간", "날짜", "datetime", "date"):
-            rename[c] = "time"
-        elif k in ("temperature", "온도"):
-            rename[c] = "temperature"
-        elif k in ("humidity", "습도"):
-            rename[c] = "humidity"
-        elif k == "ph":
-            rename[c] = "ph"
-        elif k == "ec":
-            rename[c] = "ec"
-        elif "수온" in k or "watertemp" in k:
-            rename[c] = "수온"
-        elif "co2" in k or "이산화탄소" in k:
-            rename[c] = "CO2"
-        elif "생중량" in k:
-            rename[c] = "생중량"
-        elif "잎" in k:
-            rename[c] = "잎 수"
-        elif "지상부" in k and "길이" in k:
-            rename[c] = "지상부 길이"
-        elif "지하부" in k and "길이" in k:
-            rename[c] = "지하부 길이"
-        elif "지상부" in k and ("질량" in k or "무게" in k):
-            rename[c] = "지상부 질량"
-        elif "지하부" in k and ("질량" in k or "무게" in k):
-            rename[c] = "지하부 질량"
-        elif "개체" in k:
-            rename[c] = "개체번호"
-    df = df.rename(columns=rename)
-    for c in df.columns:
-        if c in ("time", "개체번호"):
-            continue
-        if not pd.api.types.is_numeric_dtype(df[c]):
-            num = pd.to_numeric(
-                df[c].astype(str).str.replace(",", "").
-                str.extract(r"(-?\d+\.?\d*)")[0],
-                errors="coerce"
-            )
-            if num.notna().mean() >= 0.5:
-                df[c] = num
-    if "생중량" not in df.columns and {"지상부 질량", "지하부 질량"} <= set(df.columns):
-        df["생중량"] = df["지상부 질량"] + df["지하부 질량"]
-    if "time" in df.columns:
-        t = df["time"].astype(str).str.strip()
-        parsed = pd.to_datetime(t, errors="coerce", format="mixed")
-        bad = parsed.isna() & t.str.match(r"^\d{8}_\d{1,2}$")
-        if bad.any():
-            parts = t[bad].str.split("_", expand=True)
-            parsed[bad] = pd.to_datetime(parts[0], format="%Y%m%d") + \
-                         pd.to_timedelta(parts[1].astype(int), unit="h")
-        df["time"] = parsed
-    return df
+첨부한 4개 파일을 모두 활용해줘.
 
-# ─────────────────────────────────────────────
-# 파일 읽기 함수 (CSV 및 Excel 지원)
-# ─────────────────────────────────────────────
-def read_data_file(file):
-    name = file.name.lower()
-    data = file.getvalue()
-    try:
-        if name.endswith('.xlsx') or name.endswith('.xls'):
-            return pd.read_excel(io.BytesIO(data))
-        else:
-            for enc in ("utf-8-sig", "cp949"):
-                try:
-                    return pd.read_csv(io.BytesIO(data), encoding=enc)
-                except Exception:
-                    pass
-    except Exception as e:
-        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-    return pd.DataFrame()
+- 환경 데이터 엑셀 파일
+- 생육 결과 데이터 엑셀 파일
+- 압축파일 안에 포함된 관련 데이터 및 자료
+- 기존 분석 대시보드 코드가 담긴 텍스트 파일
 
-# ─────────────────────────────────────────────
-# 학교명 추출 (파일명 앞부분)
-# ─────────────────────────────────────────────
-def extract_school_name(filename):
-    base = os.path.basename(filename)
-    name = base.rsplit(".", 1)[0]
-    parts = name.replace("_", " ").replace("-", " ").split()
-    return parts[0] if parts else name
+파일마다 데이터 형식, 열 이름, 측정 항목, 날짜, 개체번호, 학교명 등을 확인하고, 실제 파일 구조에 맞게 분석해줘.
 
-# ─────────────────────────────────────────────
-# Plotly 폰트 설정 헬퍼
-# ─────────────────────────────────────────────
-def set_fig_font(fig):
-    fig.update_layout(font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif"))
+파일에 없는 데이터를 임의로 만들어내거나 측정값을 수정하지 마. 데이터가 부족하거나 형식이 불분명한 경우에는 임의로 해석하지 말고 명확히 표시해줘.
 
-# ─────────────────────────────────────────────
-# 사이드바: 파일 업로드
-# ─────────────────────────────────────────────
-st.sidebar.title("📁 데이터 업로드")
+## 2. 대시보드 전체 구성
 
-env_file = st.sidebar.file_uploader("환경 데이터 파일 (CSV 또는 Excel)", type=["csv", "xlsx", "xls"])
-growth_file = st.sidebar.file_uploader("생육 데이터 파일 (CSV 또는 Excel)", type=["csv", "xlsx", "xls"])
+Streamlit을 이용해 웹 기반 대시보드를 제작해줘.
 
-# 파일이 없으면 안내 메시지 출력 후 중단
-if env_file is None and growth_file is None:
-    st.info("왼쪽 사이드바에서 인천아라고등학교 환경 및 생육 데이터 파일을 업로드해 주세요.")
-    st.stop()
+전체적인 디자인은 깔끔하고 직관적인 데이터 분석 사이트 형태로 구성하고, 과도한 장식보다는 그래프와 수치가 잘 보이도록 해줘.
 
-env_df = None
-growth_df = None
+상단에는 프로젝트 제목과 간단한 설명을 표시하고, 사이드바에는 데이터 선택 및 분석 필터 기능을 배치해줘.
 
-if env_file is not None:
-    with st.spinner("환경 데이터를 읽는 중..."):
-        raw_env = read_data_file(env_file)
-        if not raw_env.empty:
-            env_df = std_cols(raw_env)
+다음 세 가지 탭으로 구성해줘.
 
-if growth_file is not None:
-    with st.spinner("생육 데이터를 읽는 중..."):
-        raw_growth = read_data_file(growth_file)
-        if not raw_growth.empty:
-            growth_df = std_cols(raw_growth)
+1. 환경 데이터 분석
+2. 생육 데이터 분석
+3. 환경-생육 종합 분석
 
-# 학교명 추출 및 표시
-school_name = None
-if env_file is not None:
-    school_name = extract_school_name(env_file.name)
-elif growth_file is not None:
-    school_name = extract_school_name(growth_file.name)
+## 3. 환경 데이터 분석
 
-if school_name:
-    st.sidebar.success(f"불러온 학교: {school_name}")
+환경 데이터 파일에 실제로 존재하는 측정 항목을 기준으로 분석해줘.
 
-# ─────────────────────────────────────────────
-# 메인 화면 제목
-# ─────────────────────────────────────────────
-st.title(f"🌱 {school_name or '인천아라고등학교'} 생육·환경 분석 대시보드")
+가능한 항목은 다음과 같아.
 
-# ─────────────────────────────────────────────
-# 탭 구성
-# ─────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 환경 데이터", "🌿 생육 데이터", "🔗 종합 분석"])
+- 온도
+- 습도
+- pH
+- EC
 
-# ─────────────────────────────────────────────
-# 탭 1: 환경 데이터
-# ─────────────────────────────────────────────
-with tab1:
-    try:
-        if env_df is None or env_df.empty:
-            st.info("환경 데이터가 업로드되지 않았거나 데이터가 없습니다.")
-        else:
-            if "time" in env_df.columns and env_df["time"].notna().any():
-                t_min = env_df["time"].min()
-                t_max = env_df["time"].max()
-                st.caption(f"📅 데이터 기간: {t_min.strftime('%Y-%m-%d %H:%M')} ~ {t_max.strftime('%Y-%m-%d %H:%M')}")
+각 항목에 대해 다음 기능을 구현해줘.
 
-            # 환경 지표 요약 카드
-            available_env_metrics = [c for c in ["temperature", "humidity", "ph", "ec", "수온", "CO2"] if c in env_df.columns]
-            metric_cols = st.columns(min(len(available_env_metrics), 4) if available_env_metrics else 1)
-            
-            labels_map = {
-                "temperature": "온도 (℃)",
-                "humidity": "습도 (%)",
-                "ph": "pH",
-                "ec": "EC (mS/cm)",
-                "수온": "수온 (℃)",
-                "CO2": "CO2 (ppm)"
-            }
-            
-            for i, key in enumerate(available_env_metrics[:4]):
-                vals = env_df[key].dropna()
-                with metric_cols[i]:
-                    if len(vals) >= 2:
-                        st.metric(labels_map.get(key, key), f"{vals.mean():.1f}")
-                    else:
-                        st.metric(labels_map.get(key, key), "데이터 부족")
+- 평균값, 최댓값, 최솟값 등 핵심 통계 표시
+- 날짜 및 시간에 따른 데이터 변화 그래프
+- 시간 흐름에 따른 변화 추세선
+- 날짜 범위 필터
+- 원본 데이터 확인용 테이블
 
-            st.divider()
+그래프는 각 환경 지표를 구분해 표시하고, 수치와 단위가 정확하게 표시되도록 해줘.
 
-            # 환경 시계열 서브플롯
-            if available_env_metrics:
-                n = len(available_env_metrics)
-                fig_env = make_subplots(
-                    rows=n, cols=1,
-                    subplot_titles=[labels_map.get(c, c) for c in available_env_metrics],
-                    vertical_spacing=0.06
-                )
-                for i, col in enumerate(available_env_metrics, 1):
-                    plot_df = env_df[["time", col]].dropna()
-                    if len(plot_df) >= 2:
-                        fig_env.add_trace(
-                            go.Scatter(
-                                x=plot_df["time"],
-                                y=plot_df
+실제 파일에 없는 환경 항목은 생성하지 말고, 존재하는 항목만 자동으로 표시해줘.
+
+## 4. 생육 데이터 분석
+
+생육 결과 파일에 포함된 실제 측정 항목을 기반으로 분석해줘.
+
+가능한 항목은 다음과 같아.
+
+- 잎 수
+- 지상부 길이
+- 지하부 길이
+- 지상부 질량
+- 지하부 질량
+- 생중량
+
+다음 기능을 구현해줘.
+
+- 각 생육 지표의 평균 및 주요 통계량
+- 개체별 생육 결과 비교 그래프
+- 생중량 기준 개체별 순위 비교
+- 생육 지표 간 산점도
+- 상관계수 표시
+- 상위 및 하위 개체 확인
+- 원본 생육 데이터 테이블
+
+생중량은 파일에 직접 존재하는 경우 해당 데이터를 사용하고, 지상부 질량과 지하부 질량으로 계산할 수 있는 경우에는 두 값의 합으로 계산해줘. 단, 기존 생중량 값과 계산값이 모두 존재한다면 서로 임의로 대체하지 말고 데이터의 정의와 차이를 확인해줘.
+
+개체번호를 기준으로 분석하고, 개체번호가 없는 경우에는 임의로 개체를 연결하지 마.
+
+## 5. 환경 데이터와 생육 데이터의 종합 분석
+
+이 탭은 단순히 그래프를 나열하는 것이 아니라 환경 조건과 생육 결과 사이의 관계를 살펴볼 수 있도록 구성해줘.
+
+다음 기능을 포함해줘.
+
+- 날짜별 환경 데이터 평균 계산
+- 환경 데이터 변화 추이 시각화
+- 생육 지표별 요약 통계
+- 생육 지표 간 상관관계 분석
+- 환경 조건과 생육 결과 사이의 관계를 탐색할 수 있는 분석
+
+환경 데이터의 측정 시점과 생육 측정 시점이 다를 수 있으므로 날짜, 측정 기간, 데이터 수를 먼저 확인해줘.
+
+환경 데이터와 생육 데이터의 연결 기준이 명확하지 않은 경우, 억지로 특정 환경 조건이 생육 결과를 유발했다고 결론 내리지 마. 상관관계와 인과관계를 구분하고, 데이터로 확인할 수 있는 경향만 설명해줘.
+
+## 6. 그래프 및 시각화
+
+Plotly를 활용해 시각화해줘.
+
+그래프에는 다음 요소를 적용해줘.
+
+- 한눈에 비교할 수 있는 색상
+- 명확한 제목
+- 축 이름 및 단위
+- 마우스를 올렸을 때 상세 수치 표시
+- 한글 폰트 적용
+- 데이터가 겹치거나 지나치게 복잡하지 않은 레이아웃
+
+필요한 경우 그래프를 여러 개로 나누어 배치하고, 모든 그래프가 화면에서 잘 보이도록 크기를 조정해줘.
+
+## 7. 데이터 처리 및 오류 방지
+
+데이터를 불러올 때 다음 사항을 고려해줘.
+
+- 한글 인코딩 문제 처리
+- 열 이름 공백 및 형식 표준화
+- 날짜 형식 자동 인식
+- 숫자 데이터에 포함된 쉼표 등의 문자 처리
+- 결측값 처리
+- 실제 존재하는 열만 분석에 사용
+- 데이터가 부족한 경우 오류 대신 안내 문구 표시
+- 파일 형식이 예상과 다를 경우 사용자에게 알림
+
+데이터를 분석하기 전에 각 파일의 구조를 확인하고, 서로 다른 파일의 열 이름이나 형식이 다르더라도 가능한 범위에서 적절히 대응해줘.
+
+## 8. 추가 기능
+
+가능하다면 다음 기능도 포함해줘.
+
+- 분석 대상 학교 선택
+- 날짜 범위 필터
+- 분석 데이터 표 확인
+- CSV 다운로드 기능
+- 그래프 및 결과를 보기 편하게 배치
+- 분석에 사용된 데이터 수 표시
+- 데이터가 변경되면 분석 결과도 자동으로 갱신
+
+여러 학교 데이터가 포함되어 있다면 학교별로 구분해 분석할 수 있도록 구성해줘.
+
+## 9. 디자인 방향
+
+전체 디자인은 다음 느낌으로 제작해줘.
+
+- 식물과 생명과학 실험에 어울리는 자연스러운 색감
+- 연한 녹색, 흰색, 중립적인 회색을 활용한 깔끔한 디자인
+- 통계 카드와 그래프가 중심이 되는 레이아웃
+- 글씨가 작거나 정보가 지나치게 빽빽하지 않도록 구성
+- 실제 데이터 분석 플랫폼처럼 전문적이고 완성도 있는 UI
+- 학생이 실험 결과를 발표하거나 탐구 보고서 작성에 활용할 수 있는 형태
+
+## 10. 최종 결과
+
+실제 첨부 파일을 기반으로 정상 작동하는 전체 코드를 작성해줘.
+
+기존 예시 코드의 주요 기능을 유지하되, 첨부된 파일의 데이터 구조에 맞게 개선해줘.
+
+코드 일부만 제공하지 말고 실행 가능한 전체 코드로 작성해줘. 데이터 파일을 업로드하면 자동으로 분석 결과, 통계, 그래프가 나타나도록 하고, 데이터 형식이 맞지 않을 경우에도 오류 원인을 쉽게 확인할 수 있도록 해줘.
+
+특히 환경 데이터와 생육 데이터의 관계를 분석할 때 데이터에 없는 사실을 추측하지 않고, 실제 측정 결과에 기반한 객관적인 분석을 제공하는 것이 가장 중요해.
